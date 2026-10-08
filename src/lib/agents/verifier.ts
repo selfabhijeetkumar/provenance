@@ -58,18 +58,27 @@ export function extractArxivYear(id: string): number | null {
   return null;
 }
 
-/** Check that DOI resolves via Crossref / DOI foundation. HTTP HEAD is enough. */
+/** Check that DOI resolves via doi.org foundation / Crossref. HTTP HEAD with manual redirect avoids publisher 405s. */
 export async function checkDoi(doi: string): Promise<boolean> {
   if (!doi) return true; // no DOI = skip, not fail
   try {
-    const url = `https://doi.org/${encodeURIComponent(doi)}`;
+    const cleanDoi = doi.trim().replace(/^https?:\/\/doi\.org\//i, "");
+    const url = `https://doi.org/${cleanDoi}`;
     const res = await fetch(url, {
       method: "HEAD",
-      redirect: "follow",
-      signal: AbortSignal.timeout(8_000),
-      headers: { Accept: "application/json" },
+      redirect: "manual",
+      signal: AbortSignal.timeout(6_000),
     });
-    return res.ok || res.status === 301 || res.status === 302 || res.status === 303;
+    // doi.org returns 301, 302, 303, 307, 308 redirect for existing DOIs, or 200
+    // Unresolvable DOIs return 404
+    return (
+      res.status === 200 ||
+      res.status === 301 ||
+      res.status === 302 ||
+      res.status === 303 ||
+      res.status === 307 ||
+      res.status === 308
+    );
   } catch {
     return false; // network timeout / invalid DOI -> fail resolution
   }
