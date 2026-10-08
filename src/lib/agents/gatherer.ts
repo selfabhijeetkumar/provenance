@@ -86,7 +86,7 @@ async function extractClaimsForPaper(
 
 Paper ID: ${paper.id}
 Title: ${paper.title}
-Abstract: ${paper.abstract.slice(0, 600)}
+Abstract: ${paper.abstract.slice(0, 1200)}
 
 Return ONLY valid JSON:
 {

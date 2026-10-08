@@ -174,7 +174,7 @@ async function llmSupportCheck(
   const claimList = claims
     .slice(0, 20) // batch cap
     .map(
-      (c) => `claimId: ${c.claimId}\nclaim: ${c.claim}\nabstract: ${c.abstract.slice(0, 400)}`
+      (c) => `claimId: ${c.claimId}\nclaim: ${c.claim}\nabstract: ${c.abstract.slice(0, 1500)}`
     )
     .join("\n---\n");
 
