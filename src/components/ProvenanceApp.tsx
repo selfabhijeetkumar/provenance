@@ -311,13 +311,27 @@ export function ProvenanceApp() {
         <div className="error-banner" role="alert">
           <span className="error-icon">✕</span>
           <span className="error-text">{error}</span>
-          <button
-            type="button"
-            className="error-dismiss"
-            onClick={() => setError(null)}
-          >
-            DISMISS
-          </button>
+          <div className="error-actions">
+            {runs.length > 0 && (
+              <button
+                type="button"
+                className="error-replay-btn"
+                onClick={() => {
+                  setError(null);
+                  setShowReplayPicker(true);
+                }}
+              >
+                ▶ REPLAY A RECORDED RUN
+              </button>
+            )}
+            <button
+              type="button"
+              className="error-dismiss"
+              onClick={() => setError(null)}
+            >
+              DISMISS
+            </button>
+          </div>
         </div>
       )}
 

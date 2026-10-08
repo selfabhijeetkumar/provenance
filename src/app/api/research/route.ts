@@ -19,6 +19,10 @@ import { runGatherer } from "@/lib/agents/gatherer";
 import { runWriter } from "@/lib/agents/writer";
 import { runVerifier } from "@/lib/agents/verifier";
 import { runPublisher } from "@/lib/agents/publisher";
+import { gatewayHealthCheck } from "@/lib/gemini";
+
+// Fire health check once at cold-start — logs OK/FAIL to server terminal
+gatewayHealthCheck();
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";

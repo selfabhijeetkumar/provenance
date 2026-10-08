@@ -866,6 +866,32 @@ code {
   font-family: var(--font-mono);
   font-size: 0.8rem;
   box-shadow: 0 8px 32px rgba(239, 68, 68, 0.3);
+  flex-wrap: wrap;
+  max-width: min(90vw, 700px);
+}
+
+.error-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-shrink: 0;
+  margin-left: auto;
+}
+
+.error-replay-btn {
+  background: rgba(99, 102, 241, 0.15);
+  border: 1px solid #818cf8;
+  color: #a5b4fc;
+  padding: 0.2rem 0.7rem;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 0.7rem;
+  font-family: var(--font-mono);
+  letter-spacing: 0.05em;
+  transition: background 0.15s;
+}
+.error-replay-btn:hover {
+  background: rgba(99, 102, 241, 0.3);
 }
 
 .error-dismiss {
@@ -876,6 +902,7 @@ code {
   border-radius: 4px;
   cursor: pointer;
   font-size: 0.7rem;
+  font-family: var(--font-mono);
 }
 
 .sr-only {
