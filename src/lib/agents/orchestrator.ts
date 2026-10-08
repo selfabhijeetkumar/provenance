@@ -5,7 +5,7 @@
  * Retries once on malformed LLM JSON.
  */
 
-import { chatWithRetry } from "../gemini";
+import { chatWithRetry, parseLlmJson } from "../gemini";
 import { geminiSemaphore } from "../semaphore";
 import { OrchestratorOutputSchema, type OrchestratorOutput } from "../schemas";
 import type { Emitter } from "../sse";
@@ -43,13 +43,14 @@ Topic: ${topic}`;
         )
       );
 
-      const parsed = JSON.parse(raw);
+      const parsed = parseLlmJson(raw);
       const result = OrchestratorOutputSchema.parse(parsed);
 
       emit({
         agent: "orchestrator",
         status: "done",
         result_summary: `${result.subQuestions.length} sub-questions generated`,
+        subQuestions: result.subQuestions,
       });
 
       return result;

@@ -6,7 +6,7 @@
 
 const GEMINI_BASE = process.env.GEMINI_BASE_URL ?? "http://127.0.0.1:8081/v1";
 const GEMINI_KEY = process.env.GEMINI_API_KEY ?? "sk-gemini";
-const GEMINI_MODEL = process.env.GEMINI_MODEL ?? "gemini-2.0-flash";
+const GEMINI_MODEL = process.env.GEMINI_MODEL ?? "gemini-3.6-flash";
 
 export interface ChatMessage {
   role: "user" | "assistant" | "system";
@@ -103,3 +103,38 @@ export async function chatWithRetry(
 function sleep(ms: number) {
   return new Promise((r) => setTimeout(r, ms));
 }
+
+/**
+ * Extracts and parses JSON from LLM responses, stripping any markdown
+ * code fences (e.g. ```json ... ```) and extracting JSON objects or arrays.
+ */
+export function parseLlmJson<T = unknown>(raw: string): T {
+  let cleaned = raw.trim();
+
+  // Strip code fences if present
+  if (cleaned.startsWith("```")) {
+    cleaned = cleaned.replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "").trim();
+  }
+
+  // Find outermost JSON structure (object or array)
+  const firstBrace = cleaned.indexOf("{");
+  const firstBracket = cleaned.indexOf("[");
+
+  let start = -1;
+  let end = -1;
+
+  if (firstBrace !== -1 && (firstBracket === -1 || firstBrace < firstBracket)) {
+    start = firstBrace;
+    end = cleaned.lastIndexOf("}");
+  } else if (firstBracket !== -1) {
+    start = firstBracket;
+    end = cleaned.lastIndexOf("]");
+  }
+
+  if (start !== -1 && end !== -1 && end >= start) {
+    cleaned = cleaned.slice(start, end + 1);
+  }
+
+  return JSON.parse(cleaned) as T;
+}
+

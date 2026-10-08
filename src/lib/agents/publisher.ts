@@ -36,7 +36,7 @@ function buildMarkdown(
   const annotatedFindings = draft.findings.replace(
     /\[([^\]]+)\]/g,
     (match, id) => {
-      const v = verdictMap.get(id);
+      const v = verdictMap.get(id) ?? verificationResults.find((r) => r.claimId.startsWith(id) || id.startsWith(r.claimId));
       if (!v) return match;
       return `${match}[${verdictBadge(v.verdict)}]`;
     }
@@ -110,6 +110,30 @@ export async function runPublisher(
   const md = buildMarkdown(topic, draft, table, verificationResults, runId);
   const mdPath = join(runDir, "paper.md");
   writeFileSync(mdPath, md, "utf-8");
+
+  const metaPath = join(runDir, "meta.json");
+  writeFileSync(
+    metaPath,
+    JSON.stringify(
+      {
+        runId,
+        topic,
+        timestamp: new Date().toISOString(),
+        paperCount: table.papers.length,
+        claimCount: table.claims.length,
+        verificationSummary: {
+          supported: verificationResults.filter((r) => r.verdict === "supported").length,
+          weak: verificationResults.filter((r) => r.verdict === "weak").length,
+          unsupported: verificationResults.filter((r) => r.verdict === "unsupported").length,
+        },
+        verificationResults,
+        papers: table.papers,
+      },
+      null,
+      2
+    ),
+    "utf-8"
+  );
 
   emit({
     agent: "publisher",

@@ -5,7 +5,7 @@
  * Writer cannot cite anything outside the evidence table.
  */
 
-import { chatWithRetry } from "../gemini";
+import { chatWithRetry, parseLlmJson } from "../gemini";
 import { geminiSemaphore } from "../semaphore";
 import { DraftSchema, type Draft, type EvidenceTable } from "../schemas";
 import type { Emitter } from "../sse";
@@ -95,14 +95,24 @@ Return ONLY valid JSON:
         )
       );
 
-      const parsed = JSON.parse(raw);
+      const parsed = parseLlmJson(raw);
       const draft = DraftSchema.parse(parsed);
+
+      const citedClaimIds = Array.from(
+        new Set(
+          (`${draft.abstract} ${draft.findings} ${draft.limitations}`)
+            .match(/\[([^\]]+)\]/g)
+            ?.map((m) => m.slice(1, -1))
+            ?.filter((id) => !id.startsWith("UNVERIFIED")) ?? []
+        )
+      );
 
       emit?.({
         agent: "writer",
         status: "done",
-        result_summary: `Draft complete (iteration ${iteration})`,
+        result_summary: `Draft complete (iteration ${iteration}) with ${citedClaimIds.length} citations`,
         iteration,
+        citedClaimIds,
       });
 
       return draft;

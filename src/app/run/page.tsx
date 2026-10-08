@@ -1,5 +1,5 @@
 import ProvenanceApp from "@/components/ProvenanceApp";
 
-export default function Home() {
+export default function RunPage() {
   return <ProvenanceApp />;
 }

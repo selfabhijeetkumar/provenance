@@ -108,6 +108,20 @@ export const AgentEventSchema = z.object({
   result_summary: z.string().optional(),
   timestamp: z.string(),
   iteration: z.number().optional(),
+
+  // Additive fields for 3D Evidence Graph
+  subQuestions: z.array(z.string()).optional(),
+  subQuestionIndex: z.number().optional(),
+  sourceId: z.string().optional(),
+  claimId: z.string().optional(),
+  title: z.string().optional(),
+  authors: z.array(z.string()).optional(),
+  year: z.number().optional(),
+  doi: z.string().optional(),
+  url: z.string().optional(),
+  verdict: z.enum(["verified", "supported", "weak", "unsupported"]).optional(),
+  reason: z.string().optional(),
+  citedClaimIds: z.array(z.string()).optional(),
 });
 export type AgentEvent = z.infer<typeof AgentEventSchema>;
 

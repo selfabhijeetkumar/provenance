@@ -13,7 +13,7 @@
  * After 2 rounds, unresolved claims flagged [UNVERIFIED].
  */
 
-import { chatWithRetry } from "../gemini";
+import { chatWithRetry, parseLlmJson } from "../gemini";
 import { geminiSemaphore } from "../semaphore";
 import {
   LLMVerdictsSchema,
@@ -29,7 +29,17 @@ import type { Emitter } from "../sse";
 /** Extract all [claimId] citations from draft text. */
 function extractCitations(text: string): string[] {
   const matches = text.match(/\[([^\]]+)\]/g) ?? [];
-  return matches.map((m) => m.slice(1, -1));
+  const ids: string[] = [];
+  for (const m of matches) {
+    const inner = m.slice(1, -1);
+    for (const part of inner.split(",")) {
+      const trimmed = part.trim();
+      if (trimmed && !trimmed.startsWith("UNVERIFIED") && !trimmed.startsWith("http")) {
+        ids.push(trimmed);
+      }
+    }
+  }
+  return ids;
 }
 
 /** Check that DOI resolves via Crossref. HTTP HEAD is enough — no key needed. */
@@ -121,7 +131,7 @@ ${claimList}`;
           { jsonMode: true, temperature: 0.1 }
         )
       );
-      const parsed = JSON.parse(raw);
+      const parsed = parseLlmJson(raw);
       const result = LLMVerdictsSchema.parse(parsed);
 
       const map = new Map<string, { verdict: "supported" | "weak" | "unsupported"; reason: string }>();
@@ -158,11 +168,13 @@ export async function runVerifier(
     iteration,
   });
 
-  const allText = `${draft.abstract} ${draft.findings} ${draft.limitations} ${draft.references}`;
-  const citedIds = new Set(extractCitations(allText));
+  const inTextContent = `${draft.abstract} ${draft.findings} ${draft.limitations}`;
+  const citedIds = new Set(extractCitations(inTextContent));
 
-  // Only verify claims that are actually cited in the draft
-  const claimsToVerify = table.claims.filter((c) => citedIds.has(c.claimId));
+  // Verify claims that are cited by claimId, paperId, or sourceId
+  const claimsToVerify = table.claims.filter(
+    (c) => citedIds.has(c.claimId) || citedIds.has(c.paperId) || citedIds.has(c.sourceId)
+  );
 
   emit({
     agent: "verifier",
@@ -218,6 +230,24 @@ export async function runVerifier(
       metadataMatch: check.metadataMatch,
     };
   });
+
+  // Emit one event per citation with {sourceId, claimId, verdict, reason, iteration}
+  for (const r of results) {
+    const claim = claimsToVerify.find((c) => c.claimId === r.claimId);
+    const paper = table.papers.find(
+      (p) => p.id === claim?.paperId || p.id === claim?.sourceId || r.claimId.startsWith(p.id)
+    );
+    emit({
+      agent: "verifier",
+      status: "result",
+      sourceId: claim?.sourceId ?? claim?.paperId ?? paper?.id ?? r.claimId,
+      claimId: r.claimId,
+      verdict: r.verdict === "supported" ? "verified" : r.verdict,
+      reason: r.reason,
+      iteration,
+      result_summary: `[${r.claimId}]: ${(r.verdict === "supported" ? "verified" : r.verdict).toUpperCase()} — ${r.reason.slice(0, 80)}`,
+    });
+  }
 
   // Build feedback for Writer
   const failed = results.filter((r) => r.verdict === "unsupported");

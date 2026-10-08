@@ -73,9 +73,21 @@ function extract(xml: string, tag: string): string | undefined {
 
 // ── OpenAlex ──────────────────────────────────────────────────────────────────
 
+function cleanSearchQuery(query: string): string {
+  const stopWords = new Set(["what", "which", "how", "why", "are", "the", "and", "for", "with", "from", "that", "this", "can", "does", "regarding", "between"]);
+  const terms = query
+    .replace(/[^\w\s-]/g, " ")
+    .split(/\s+/)
+    .filter((w) => w.length > 2 && !stopWords.has(w.toLowerCase()))
+    .slice(0, 6)
+    .join(" ");
+  return terms || query.slice(0, 50);
+}
+
 async function fetchOpenAlex(query: string, perPage = 8): Promise<Paper[]> {
+  const cleanQuery = cleanSearchQuery(query);
   const url = new URL("https://api.openalex.org/works");
-  url.searchParams.set("search", query);
+  url.searchParams.set("search", cleanQuery);
   url.searchParams.set("per-page", String(perPage));
   url.searchParams.set("select", "id,title,authorships,publication_year,abstract_inverted_index,doi,primary_location");
   url.searchParams.set("mailto", "provenance-app@example.com"); // polite pool
@@ -100,7 +112,7 @@ async function fetchOpenAlex(query: string, perPage = 8): Promise<Paper[]> {
         authors,
         year: r.publication_year ?? undefined,
         abstract,
-        doi: r.doi?.replace("https://doi.org/", "") ?? undefined,
+        doi: typeof r.doi === "string" ? r.doi.replace("https://doi.org/", "") : undefined,
         url: (r.primary_location as { landing_page_url?: string } | null)?.landing_page_url ?? r.id as string,
         source: "openalex",
       });
@@ -171,6 +183,20 @@ export async function runExplorer(
       tool_call: "arxiv_search",
       result_summary: `${data.length} papers${stale ? " (stale cache)" : ""}`,
     });
+    for (const paper of data) {
+      emit({
+        agent,
+        status: "result",
+        tool_call: "arxiv_search",
+        sourceId: paper.id,
+        title: paper.title,
+        authors: paper.authors,
+        year: paper.year,
+        doi: paper.doi,
+        url: paper.url,
+        subQuestionIndex: explorerIndex,
+      });
+    }
   } catch (err) {
     emit({
       agent,
@@ -193,6 +219,20 @@ export async function runExplorer(
       tool_call: "openalex_search",
       result_summary: `${data.length} papers${stale ? " (stale cache)" : ""}`,
     });
+    for (const paper of data) {
+      emit({
+        agent,
+        status: "result",
+        tool_call: "openalex_search",
+        sourceId: paper.id,
+        title: paper.title,
+        authors: paper.authors,
+        year: paper.year,
+        doi: paper.doi,
+        url: paper.url,
+        subQuestionIndex: explorerIndex,
+      });
+    }
   } catch (err) {
     emit({
       agent,

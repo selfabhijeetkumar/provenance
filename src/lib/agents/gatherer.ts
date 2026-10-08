@@ -5,7 +5,7 @@
  * 3. Builds evidence table: { claims[], papers[] }
  */
 
-import { chatWithRetry } from "../gemini";
+import { chatWithRetry, parseLlmJson } from "../gemini";
 import { geminiSemaphore } from "../semaphore";
 import {
   ClaimsExtractionSchema,
@@ -70,11 +70,11 @@ Return ONLY valid JSON:
           { jsonMode: true, temperature: 0.1 }
         )
       );
-      const parsed = JSON.parse(raw);
+      const parsed = parseLlmJson(raw);
       const result = ClaimsExtractionSchema.parse(parsed);
 
-      return result.claims.map((c) => ({
-        claimId: c.claimId,
+      return result.claims.map((c, idx) => ({
+        claimId: c.claimId && c.claimId.startsWith(paper.id) ? c.claimId : `${paper.id}:${idx + 1}`,
         claim: c.claim,
         sourceId: paper.id,
         paperId: paper.id,
