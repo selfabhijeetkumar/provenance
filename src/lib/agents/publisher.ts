@@ -16,6 +16,7 @@ import type {
   VerificationResult,
 } from "../schemas";
 import type { Emitter } from "../sse";
+import { buildVerificationReport } from "../verificationReport";
 
 function verdictBadge(verdict: "supported" | "weak" | "unsupported"): string {
   switch (verdict) {
@@ -34,14 +35,21 @@ function buildMarkdown(
 ): string {
   const verdictMap = new Map(verificationResults.map((v) => [v.claimId, v]));
 
-  const annotatedFindings = draft.findings.replace(
-    /\[([^\]]+)\]/g,
-    (match, id) => {
-      const v = verdictMap.get(id) ?? verificationResults.find((r) => r.claimId.startsWith(id) || id.startsWith(r.claimId));
+  const annotateSection = (text: string) =>
+    text.replace(/\[([^\]]+)\]/g, (match, id) => {
+      if (id.startsWith("UNVERIFIED:")) {
+        const cleanId = id.replace("UNVERIFIED:", "");
+        return `[${cleanId}][❌ UNVERIFIED]`;
+      }
+      const v =
+        verdictMap.get(id) ??
+        verificationResults.find((r) => r.claimId.startsWith(id) || id.startsWith(r.claimId));
       if (!v) return match;
       return `${match}[${verdictBadge(v.verdict)}]`;
-    }
-  );
+    });
+
+  const annotatedAbstract = annotateSection(draft.abstract);
+  const annotatedFindings = annotateSection(draft.findings);
 
   const refLines = table.papers
     .slice(0, 30)
@@ -64,7 +72,7 @@ function buildMarkdown(
 
 ## Abstract
 
-${draft.abstract}
+${annotatedAbstract}
 
 ---
 
@@ -143,6 +151,17 @@ export async function runPublisher(
     const replayPath = join(runDir, "replay.jsonl");
     writeFileSync(replayPath, collectedEvents.join("\n") + "\n", "utf-8");
   }
+
+  // TASK 1: persist per-run verification report
+  const verificationReport = buildVerificationReport(
+    runId,
+    topic,
+    draft,
+    table,
+    verificationResults
+  );
+  const reportPath = join(runDir, "verification-report.json");
+  writeFileSync(reportPath, JSON.stringify(verificationReport, null, 2), "utf-8");
 
   emit({
     agent: "publisher",

@@ -57,12 +57,12 @@ export async function runWriter(
   const prompt = `You are a research writer. Write a structured research paper on the given topic using ONLY the evidence provided.
 
 RULES:
-1. Every factual claim MUST end with [claimId] citing a claim from the evidence list below.
-2. You MUST NOT cite any source not in the evidence list.
-3. You MUST cite at least ${Math.min(claimCount, 8)} distinct claims spread across as many papers as possible.
+1. Every factual claim in Abstract, Findings, and Limitations MUST end with [claimId] (e.g. [arxiv:...:1]) citing a specific claim from the evidence list below.
+2. You MUST NOT cite any source or claim not in the evidence list.
+3. You MUST cite at least ${Math.min(claimCount, 12)} distinct claims (target 10-15 claims) spread across as many papers as possible.
 4. Write in formal academic English.
-5. Findings section: 3-5 paragraphs, each paragraph making at least 2 cited claims.
-6. Limitations section must acknowledge gaps in the evidence.
+5. Findings section: 3-5 substantive paragraphs, each paragraph making at least 2-3 cited claims.
+6. Limitations section must acknowledge gaps in the evidence, citing relevant claims where appropriate.
 7. References section must list ONLY papers actually cited in the text.
 8. Do not pad with uncited sentences — if you cannot support a sentence with a citation from the list, omit it.
 ${feedbackSection}

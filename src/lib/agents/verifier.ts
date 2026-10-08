@@ -42,8 +42,24 @@ function extractCitations(text: string): string[] {
   return ids;
 }
 
-/** Check that DOI resolves via Crossref. HTTP HEAD is enough — no key needed. */
-async function checkDoi(doi: string): Promise<boolean> {
+/** Extract year from arXiv identifier (handles new YYMM.NNNNN and legacy arch/YYMMNNN formats). */
+export function extractArxivYear(id: string): number | null {
+  if (!id) return null;
+  const newMatch = id.match(/arxiv:(\d{2})(\d{2})\./i) || id.match(/(?:^|\/)(\d{2})(\d{2})\.\d{4,5}/);
+  if (newMatch) {
+    const yy = parseInt(newMatch[1], 10);
+    return yy >= 90 ? 1900 + yy : 2000 + yy;
+  }
+  const oldMatch = id.match(/arxiv:[a-z\-]+(?:\.[a-z]{2})?\/(\d{2})(\d{2})\d{3}/i);
+  if (oldMatch) {
+    const yy = parseInt(oldMatch[1], 10);
+    return yy >= 90 ? 1900 + yy : 2000 + yy;
+  }
+  return null;
+}
+
+/** Check that DOI resolves via Crossref / DOI foundation. HTTP HEAD is enough. */
+export async function checkDoi(doi: string): Promise<boolean> {
   if (!doi) return true; // no DOI = skip, not fail
   try {
     const url = `https://doi.org/${encodeURIComponent(doi)}`;
@@ -55,39 +71,87 @@ async function checkDoi(doi: string): Promise<boolean> {
     });
     return res.ok || res.status === 301 || res.status === 302 || res.status === 303;
   } catch {
-    return false; // network timeout → treat as inconclusive, not blocking
+    return false; // network timeout / invalid DOI -> fail resolution
   }
 }
 
-async function deterministicCheck(
+/** Validate metadata completeness and consistency (title, authors, year, arxiv consistency). */
+export function validateMetadata(paper: {
+  id: string;
+  title: string;
+  authors: string[];
+  year?: number;
+}): { valid: boolean; reason?: string } {
+  if (!paper.title || paper.title.trim().length < 4) {
+    return { valid: false, reason: "Missing or invalid title in metadata" };
+  }
+  if (!Array.isArray(paper.authors) || paper.authors.length === 0) {
+    return { valid: false, reason: "Missing authors in metadata" };
+  }
+  if (paper.year !== undefined && (paper.year < 1900 || paper.year > 2030)) {
+    return { valid: false, reason: `Invalid publication year (${paper.year}) in metadata` };
+  }
+  const arxivYear = extractArxivYear(paper.id);
+  if (arxivYear !== null && paper.year !== undefined) {
+    if (Math.abs(arxivYear - paper.year) > 1) {
+      return {
+        valid: false,
+        reason: `Year mismatch: arXiv ID indicates ~${arxivYear} but metadata says ${paper.year}`,
+      };
+    }
+  }
+  return { valid: true };
+}
+
+export async function deterministicCheck(
   claim: Claim,
-  table: EvidenceTable
+  table: EvidenceTable,
+  skipNetworkDoi = false
 ): Promise<{ pass: boolean; urlResolved?: boolean; metadataMatch?: boolean; reason?: string }> {
   // Check 1: citation ID exists in evidence table
-  const paperExists = table.papers.some((p) => p.id === claim.paperId);
-  if (!paperExists) {
+  const paper = table.papers.find((p) => p.id === claim.paperId);
+  if (!paper) {
     return {
       pass: false,
+      urlResolved: false,
+      metadataMatch: false,
       reason: `Citation ID "${claim.paperId}" not found in evidence table`,
     };
   }
 
-  const paper = table.papers.find((p) => p.id === claim.paperId)!;
-
-  // Check 2: DOI resolves (best effort, non-blocking)
-  let urlResolved: boolean | undefined;
-  if (paper.doi) {
-    urlResolved = await checkDoi(paper.doi);
+  // Check 2: title + authors + year match stored metadata
+  const meta = validateMetadata(paper);
+  if (!meta.valid) {
+    return {
+      pass: false,
+      urlResolved: undefined,
+      metadataMatch: false,
+      reason: meta.reason,
+    };
   }
 
-  // Check 3: abstract not empty (metadata sanity)
-  const metadataMatch = !!(paper.title && paper.authors.length > 0);
+  // Check 3: DOI resolves via Crossref (if DOI present)
+  let urlResolved: boolean | undefined;
+  if (paper.doi) {
+    if (skipNetworkDoi) {
+      urlResolved = true;
+    } else {
+      urlResolved = await checkDoi(paper.doi);
+      if (!urlResolved) {
+        return {
+          pass: false,
+          urlResolved: false,
+          metadataMatch: true,
+          reason: `Unresolvable DOI: ${paper.doi}`,
+        };
+      }
+    }
+  }
 
   return {
-    pass: metadataMatch,
+    pass: true,
     urlResolved,
-    metadataMatch,
-    reason: metadataMatch ? undefined : "Missing title or authors in metadata",
+    metadataMatch: true,
   };
 }
 
@@ -171,10 +235,43 @@ export async function runVerifier(
   const inTextContent = `${draft.abstract} ${draft.findings} ${draft.limitations}`;
   const citedIds = new Set(extractCitations(inTextContent));
 
-  // Verify claims that are cited by claimId, paperId, or sourceId
-  const claimsToVerify = table.claims.filter(
-    (c) => citedIds.has(c.claimId) || citedIds.has(c.paperId) || citedIds.has(c.sourceId)
-  );
+  // Build claimsToVerify ensuring EVERY citedId is accounted for
+  const claimsToVerify: Claim[] = [];
+  const processedCitations = new Set<string>();
+
+  for (const cid of citedIds) {
+    const matchingClaims = table.claims.filter(
+      (c) => c.claimId === cid || c.paperId === cid || c.sourceId === cid
+    );
+    if (matchingClaims.length > 0) {
+      for (const mc of matchingClaims) {
+        if (!processedCitations.has(mc.claimId)) {
+          claimsToVerify.push(mc);
+          processedCitations.add(mc.claimId);
+        }
+      }
+    } else {
+      const matchingPaper = table.papers.find((p) => p.id === cid);
+      if (matchingPaper) {
+        claimsToVerify.push({
+          claimId: cid,
+          paperId: cid,
+          sourceId: cid,
+          claim: matchingPaper.title,
+          abstract: matchingPaper.abstract ?? "",
+        });
+      } else {
+        // Phantom citation outside evidence table
+        claimsToVerify.push({
+          claimId: cid,
+          paperId: cid,
+          sourceId: cid,
+          claim: `Unrecognized citation: ${cid}`,
+          abstract: "",
+        });
+      }
+    }
+  }
 
   emit({
     agent: "verifier",
@@ -192,25 +289,33 @@ export async function runVerifier(
     })
   );
 
+  // Filter only deterministic passes for LLM semantic verification
+  const claimsForLlm = claimsToVerify.filter((c) => {
+    const det = deterministicResults.find((dr) => dr.claim.claimId === c.claimId);
+    return det?.check.pass === true;
+  });
+
   // LLM semantic check
   emit({
     agent: "verifier",
     status: "tool_call",
     tool_call: "llm_support_check",
-    input_summary: `Semantic check on ${claimsToVerify.length} claims`,
+    input_summary: `Semantic check on ${claimsForLlm.length} claims passing deterministic checks`,
     iteration,
   });
 
   let llmVerdicts = new Map<string, { verdict: "supported" | "weak" | "unsupported"; reason: string }>();
-  try {
-    llmVerdicts = await llmSupportCheck(claimsToVerify);
-  } catch (err) {
-    emit({
-      agent: "verifier",
-      status: "degraded",
-      result_summary: `LLM check failed, using deterministic only: ${String(err)}`,
-      iteration,
-    });
+  if (claimsForLlm.length > 0) {
+    try {
+      llmVerdicts = await llmSupportCheck(claimsForLlm);
+    } catch (err) {
+      emit({
+        agent: "verifier",
+        status: "degraded",
+        result_summary: `LLM check failed, using deterministic only: ${String(err)}`,
+        iteration,
+      });
+    }
   }
 
   // Combine results
@@ -265,9 +370,12 @@ export async function runVerifier(
   if (iteration >= MAX_ITERATIONS && failed.length > 0) {
     const failedIds = new Set(failed.map((r) => r.claimId));
     const flagDraft = (text: string) =>
-      text.replace(/\[([^\]]+)\]/g, (match, id) =>
-        failedIds.has(id) ? `[UNVERIFIED:${id}]` : match
-      );
+      text.replace(/\[([^\]]+)\]/g, (match, id) => {
+        const isFailed =
+          failedIds.has(id) ||
+          Array.from(failedIds).some((fid) => fid === id || fid.startsWith(id) || id.startsWith(fid));
+        return isFailed ? `[UNVERIFIED:${id}]` : match;
+      });
     draftWithFlags = {
       abstract: flagDraft(draft.abstract),
       findings: flagDraft(draft.findings),

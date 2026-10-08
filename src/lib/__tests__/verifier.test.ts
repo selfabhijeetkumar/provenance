@@ -1,55 +1,56 @@
 /**
- * Unit tests for:
- *   1. Verifier deterministic checks (extractCitations, deterministicCheck)
- *   2. Gatherer deduplication (deduplicatePapers)
- *   3. Gatherer relevance ranking (tokenizeTopic / relevanceScore via runGatherer)
+ * Unit tests for PROVENANCE Verification Engine:
+ *   1. Verifier deterministic checks (extractCitations, validateMetadata, extractArxivYear, deterministicCheck)
+ *   2. False pass prevention:
+ *      - matching case passes
+ *      - wrong year fails (e.g. arXiv 1904 preprint claimed as 2012)
+ *      - wrong/empty title fails
+ *      - missing authors fails
+ *      - id not in evidence table fails
+ *      - unresolvable DOI fails
+ *   3. Deduplication (deduplicatePapers)
+ *   4. Citation extraction
  *
- * Run: node --experimental-vm-modules src/lib/__tests__/verifier.test.mjs
- * (or: npx tsx src/lib/__tests__/verifier.test.ts)
- *
- * No test framework dependency — uses Node assert.
- * Each test is a function; failures throw.
+ * Run: npm test (or: npx tsx src/lib/__tests__/verifier.test.ts)
  */
 
 import assert from "node:assert/strict";
-import { deduplicatePapers } from "../agents/gatherer.js";
+import { deduplicatePapers } from "../agents/gatherer";
+import {
+  deterministicCheck,
+  extractArxivYear,
+  validateMetadata,
+} from "../agents/verifier";
+import type { Claim, EvidenceTable, Paper } from "../schemas";
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-/** Minimal Paper factory */
-function makePaper(overrides: Partial<{
-  id: string; title: string; authors: string[]; year: number;
-  abstract: string; doi: string; url: string; source: "arxiv" | "openalex";
-}>) {
+function makePaper(overrides: Partial<Paper> = {}): Paper {
   return {
     id: overrides.id ?? "arxiv:test:1",
-    title: overrides.title ?? "Test Paper",
-    authors: overrides.authors ?? ["Author One"],
+    title: overrides.title ?? "A Rigorous Examination of Surface Codes",
+    authors: overrides.authors ?? ["Alice Walker", "Bob Smith"],
     year: overrides.year ?? 2024,
-    abstract: overrides.abstract ?? "A useful abstract about the topic.",
+    abstract: overrides.abstract ?? "A comprehensive analysis of surface code quantum error correction.",
     doi: overrides.doi,
     url: overrides.url ?? "http://example.com/paper",
-    source: overrides.source ?? ("arxiv" as const),
+    source: overrides.source ?? "arxiv",
   };
 }
 
-/** Minimal Claim factory */
-function makeClaim(paperId: string, claimId: string, claim: string) {
+function makeClaim(paperId: string, claimId: string, claimText: string): Claim {
   return {
     claimId,
-    claim,
+    claim: claimText,
     sourceId: paperId,
     paperId,
-    abstract: "Some abstract text that supports the claim.",
+    abstract: "A comprehensive analysis of surface code quantum error correction.",
   };
 }
 
-/** Minimal EvidenceTable factory */
-function makeTable(claims: ReturnType<typeof makeClaim>[], papers: ReturnType<typeof makePaper>[]) {
+function makeTable(claims: Claim[], papers: Paper[]): EvidenceTable {
   return { claims, papers };
 }
-
-// ── Citation extraction ───────────────────────────────────────────────────────
 
 function extractCitations(text: string): string[] {
   const matches = text.match(/\[([^\]]+)\]/g) ?? [];
@@ -66,33 +67,15 @@ function extractCitations(text: string): string[] {
   return ids;
 }
 
-// ── Deterministic check (inlined — tests the logic, not the network) ──────────
+// ── Test Runner ───────────────────────────────────────────────────────────────
 
-function deterministicCheckSync(
-  claim: { paperId: string; claimId: string },
-  table: { papers: Array<{ id: string; title: string; authors: string[] }> }
-): { pass: boolean; reason?: string } {
-  const paperExists = table.papers.some((p) => p.id === claim.paperId);
-  if (!paperExists) {
-    return { pass: false, reason: `Citation ID "${claim.paperId}" not found in evidence table` };
-  }
-  const paper = table.papers.find((p) => p.id === claim.paperId)!;
-  const metadataMatch = !!(paper.title && paper.authors.length > 0);
-  return {
-    pass: metadataMatch,
-    reason: metadataMatch ? undefined : "Missing title or authors in metadata",
-  };
-}
+const tests: Array<{ name: string; fn: () => void | Promise<void> }> = [];
 
-// ── Tests ─────────────────────────────────────────────────────────────────────
-
-const tests: Array<{ name: string; fn: () => void }> = [];
-
-function test(name: string, fn: () => void) {
+function test(name: string, fn: () => void | Promise<void>) {
   tests.push({ name, fn });
 }
 
-// -- Citation extraction tests --
+// ── Citation Extraction Tests ─────────────────────────────────────────────────
 
 test("extractCitations: extracts simple claimId", () => {
   const ids = extractCitations("The CRISPR/Cas approach [arxiv:1904.06375v2:1] was demonstrated.");
@@ -119,65 +102,84 @@ test("extractCitations: handles comma-separated ids", () => {
   assert.deepEqual(ids, ["id:1", "id:2"]);
 });
 
-// -- Deterministic check tests --
+// ── arXiv Year Extraction Tests ───────────────────────────────────────────────
 
-test("deterministicCheck: matching paperId passes", () => {
-  const claim = makeClaim("arxiv:1904.06375v2", "arxiv:1904.06375v2:1", "CRISPR demonstrated in 2012");
-  const table = makeTable([claim], [makePaper({ id: "arxiv:1904.06375v2" })]);
-  const result = deterministicCheckSync(claim, table);
-  assert.equal(result.pass, true);
+test("extractArxivYear: handles modern and legacy arXiv IDs", () => {
+  assert.equal(extractArxivYear("arxiv:1904.06375v2"), 2019);
+  assert.equal(extractArxivYear("arxiv:2305.11917v1"), 2023);
+  assert.equal(extractArxivYear("arxiv:0801.1234v3"), 2008);
+  assert.equal(extractArxivYear("arxiv:q-bio/0309011v2"), 2003);
+  assert.equal(extractArxivYear("arxiv:astro-ph/0609027v1"), 2006);
+  assert.equal(extractArxivYear("openalex:https://openalex.org/W123"), null);
 });
 
-test("deterministicCheck: paperId not in evidence table fails", () => {
-  const claim = makeClaim("arxiv:FAKE999", "arxiv:FAKE999:1", "Made up claim");
-  const paper = makePaper({ id: "arxiv:REAL001" });
+// ── TASK 2 Deterministic Verifier Audits ───────────────────────────────────────
+
+test("deterministicCheck: matching case passes", async () => {
+  const paper = makePaper({ id: "arxiv:1904.06375v2", year: 2019 });
+  const claim = makeClaim("arxiv:1904.06375v2", "arxiv:1904.06375v2:1", "CRISPR demonstrated in 2012");
   const table = makeTable([claim], [paper]);
-  const result = deterministicCheckSync(claim, table);
+  const result = await deterministicCheck(claim, table, true);
+  assert.equal(result.pass, true);
+  assert.equal(result.metadataMatch, true);
+});
+
+test("deterministicCheck: wrong year fails (arXiv 1904 claimed as 2012)", async () => {
+  // A paper with arXiv ID 1904 is April 2019. If recorded metadata claims 2012, it must fail.
+  const paper = makePaper({ id: "arxiv:1904.06375v2", year: 2012 });
+  const claim = makeClaim("arxiv:1904.06375v2", "arxiv:1904.06375v2:1", "CRISPR demonstrated in 2012");
+  const table = makeTable([claim], [paper]);
+  const result = await deterministicCheck(claim, table, true);
+  assert.equal(result.pass, false);
+  assert.ok(result.reason?.includes("Year mismatch"));
+});
+
+test("deterministicCheck: wrong title fails (empty or whitespace)", async () => {
+  const paper = makePaper({ id: "arxiv:2305.11917v1", title: "   " });
+  const claim = makeClaim("arxiv:2305.11917v1", "arxiv:2305.11917v1:1", "Some claim");
+  const table = makeTable([claim], [paper]);
+  const result = await deterministicCheck(claim, table, true);
+  assert.equal(result.pass, false);
+  assert.ok(result.reason?.includes("Missing or invalid title"));
+});
+
+test("deterministicCheck: missing authors fails", async () => {
+  const paper = makePaper({ id: "arxiv:2305.11917v1", authors: [] });
+  const claim = makeClaim("arxiv:2305.11917v1", "arxiv:2305.11917v1:1", "Some claim");
+  const table = makeTable([claim], [paper]);
+  const result = await deterministicCheck(claim, table, true);
+  assert.equal(result.pass, false);
+  assert.ok(result.reason?.includes("Missing authors"));
+});
+
+test("deterministicCheck: id not in evidence table fails", async () => {
+  const paper = makePaper({ id: "arxiv:REAL100", year: 2024 });
+  const claim = makeClaim("arxiv:FAKE999", "arxiv:FAKE999:1", "Made up claim");
+  const table = makeTable([claim], [paper]);
+  const result = await deterministicCheck(claim, table, true);
   assert.equal(result.pass, false);
   assert.ok(result.reason?.includes("not found in evidence table"));
 });
 
-test("deterministicCheck: paper with no title fails metadata check", () => {
-  const claim = makeClaim("arxiv:notitle", "arxiv:notitle:1", "Some claim");
-  const badPaper = { ...makePaper({ id: "arxiv:notitle" }), title: "" };
-  const table = makeTable([claim], [badPaper]);
-  const result = deterministicCheckSync(claim, table);
-  assert.equal(result.pass, false);
-  assert.ok(result.reason?.includes("Missing title"));
-});
-
-test("deterministicCheck: paper with no authors fails metadata check", () => {
-  const claim = makeClaim("arxiv:noauth", "arxiv:noauth:1", "Some claim");
-  const badPaper = { ...makePaper({ id: "arxiv:noauth" }), authors: [] };
-  const table = makeTable([claim], [badPaper]);
-  const result = deterministicCheckSync(claim, table);
-  assert.equal(result.pass, false);
-  assert.ok(result.reason?.includes("Missing title or authors"));
-});
-
-// NOTE: arXiv IDs starting 1904 are from April 2019, not 2012.
-// The verified claim was "CRISPR demonstrated in 2012" from a 2019 *review* paper.
-// That is correct behavior — the review paper discusses the 2012 event.
-// The deterministic check only validates metadata completeness + id-in-table,
-// not the semantic year of the event described. That is the LLM verifier's job.
-test("deterministicCheck: arxiv 1904 paper is 2019 (metadata year check)", () => {
-  const paper = makePaper({ id: "arxiv:1904.06375v2", year: 2019 });
-  assert.equal(paper.year, 2019,
-    "A paper with arXiv ID 1904.06375 must have year 2019 (April 2019 preprint)");
-  // The claim text says 'demonstrated in 2012' — that is a citation to a historical event IN the paper
-  // Deterministic check correctly passes because metadata (title, authors) is present
-  const claim = makeClaim("arxiv:1904.06375v2", "arxiv:1904.06375v2:1", "CRISPR demonstrated in 2012");
+test("deterministicCheck: unresolvable DOI fails", async () => {
+  // Pass a known fake DOI and run with live resolution (should fail with 404 / resolution error)
+  const paper = makePaper({
+    id: "arxiv:2305.11917v1",
+    year: 2023,
+    doi: "10.99999/provenance.invalid.doi.nonexistent",
+  });
+  const claim = makeClaim("arxiv:2305.11917v1", "arxiv:2305.11917v1:1", "Some claim");
   const table = makeTable([claim], [paper]);
-  const result = deterministicCheckSync(claim, table);
-  assert.equal(result.pass, true,
-    "Correct: deterministic check passes metadata; LLM check validates semantic support");
+  const result = await deterministicCheck(claim, table, false); // false = check real resolution
+  assert.equal(result.pass, false);
+  assert.ok(result.reason?.includes("Unresolvable DOI"));
 });
 
-// -- Deduplication tests --
+// ── Deduplication Tests ───────────────────────────────────────────────────────
 
 test("deduplicatePapers: removes exact DOI duplicates", () => {
   const p1 = makePaper({ id: "arxiv:1", doi: "10.1234/test", title: "Paper A" });
-  const p2 = makePaper({ id: "openalex:2", doi: "10.1234/test", title: "Paper A Alt" }); // same DOI
+  const p2 = makePaper({ id: "openalex:2", doi: "10.1234/test", title: "Paper A Alt" });
   const result = deduplicatePapers([p1, p2]);
   assert.equal(result.length, 1);
   assert.equal(result[0].id, "arxiv:1");
@@ -204,25 +206,28 @@ test("deduplicatePapers: keeps papers with same title but different year", () =>
   assert.equal(result.length, 2);
 });
 
-// ── Run all tests ─────────────────────────────────────────────────────────────
+// ── Run All Tests ─────────────────────────────────────────────────────────────
 
-let passed = 0;
-let failed = 0;
+async function run() {
+  let passed = 0;
+  let failed = 0;
 
-for (const { name, fn } of tests) {
-  try {
-    fn();
-    console.log(`  ✓ ${name}`);
-    passed++;
-  } catch (err) {
-    console.error(`  ✗ ${name}`);
-    console.error(`    ${(err as Error).message}`);
-    failed++;
+  for (const { name, fn } of tests) {
+    try {
+      await fn();
+      console.log(`  ✓ ${name}`);
+      passed++;
+    } catch (err) {
+      console.error(`  ✗ ${name}`);
+      console.error(`    ${(err as Error).message}`);
+      failed++;
+    }
+  }
+
+  console.log(`\n${passed} passed, ${failed} failed`);
+  if (failed > 0) {
+    process.exit(1);
   }
 }
 
-console.log(`\n${passed} passed, ${failed} failed`);
-
-if (failed > 0) {
-  process.exit(1);
-}
+run();
