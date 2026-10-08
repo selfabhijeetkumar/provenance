@@ -1,12 +1,15 @@
 /**
- * Gemini LLM client — reuses the local gemini-web2api gateway.
- * Base URL: http://127.0.0.1:8081/v1
- * Key: sk-gemini (server-side only, never sent to browser)
+ * Gemini LLM client — OpenAI-compatible gateway.
+ * All configuration comes from env vars (server-side only, never sent to browser).
+ * Supports local gemini-web2api, hosted Gemini API, or any OpenAI-compatible endpoint.
+ *
+ * Required: GEMINI_BASE_URL, GEMINI_API_KEY, GEMINI_MODEL
  */
 
-const GEMINI_BASE = process.env.GEMINI_BASE_URL ?? "http://127.0.0.1:8081/v1";
-const GEMINI_KEY = process.env.GEMINI_API_KEY ?? "sk-gemini";
-const GEMINI_MODEL = process.env.GEMINI_MODEL ?? "gemini-3.6-flash";
+// Throw at module load time if required vars are missing (server-side only)
+const GEMINI_BASE = process.env.GEMINI_BASE_URL ?? "";
+const GEMINI_KEY = process.env.GEMINI_API_KEY ?? "";
+const GEMINI_MODEL = process.env.GEMINI_MODEL ?? "gemini-2.0-flash";
 
 export interface ChatMessage {
   role: "user" | "assistant" | "system";
@@ -36,6 +39,10 @@ export async function chat(
 
   if (opts.jsonMode) {
     body.response_format = { type: "json_object" };
+  }
+
+  if (!GEMINI_BASE) {
+    throw new GeminiError(503, "GEMINI_BASE_URL is not set. Configure it in .env.local");
   }
 
   const res = await fetch(`${GEMINI_BASE}/chat/completions`, {

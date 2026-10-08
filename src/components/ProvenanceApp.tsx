@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useRef } from "react";
+import { useState, useRef, useEffect } from "react";
 import dynamic from "next/dynamic";
 import { useEvidenceStore } from "@/lib/store";
 import { AgentHud } from "./ui/AgentHud";
@@ -13,6 +13,14 @@ const EvidenceGraphCanvas = dynamic(
   () => import("./canvas/EvidenceGraphCanvas"),
   { ssr: false }
 );
+
+interface RunMeta {
+  runId: string;
+  topic: string;
+  timestamp: string;
+  hasReplay: boolean;
+  verificationSummary?: { supported: number; weak: number; unsupported: number };
+}
 
 export function ProvenanceApp() {
   const stage = useEvidenceStore((s) => s.stage);
@@ -28,7 +36,60 @@ export function ProvenanceApp() {
 
   const [inputTopic, setInputTopic] = useState("");
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [isReplaying, setIsReplaying] = useState(false);
+  const [runs, setRuns] = useState<RunMeta[]>([]);
+  const [showReplayPicker, setShowReplayPicker] = useState(false);
   const abortRef = useRef<AbortController | null>(null);
+
+  // Load available runs on mount for replay picker
+  useEffect(() => {
+    fetch("/api/runs")
+      .then((r) => r.json())
+      .then((data: RunMeta[]) => setRuns(data.filter((r) => r.hasReplay)))
+      .catch(() => {});
+  }, [stage]); // reload after a run completes
+
+  async function consumeStream(res: Response, replayMode = false) {
+    if (!res.body) throw new Error("No response body received from stream");
+
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split("\n\n");
+      buffer = lines.pop() ?? "";
+
+      for (const block of lines) {
+        for (const line of block.split("\n")) {
+          if (line.startsWith("data: ")) {
+            const raw = line.slice(6).trim();
+            if (raw === "[DONE]") {
+              // Stream finished
+            } else {
+              try {
+                const parsed = JSON.parse(raw);
+                if (parsed.type === "run_complete" || parsed.type === "replay_start") {
+                  if (parsed.type === "run_complete") {
+                    setResult({ ...parsed.payload, isReplay: replayMode });
+                  }
+                  // replay_start: topic already set
+                } else {
+                  processEvent(parsed);
+                }
+              } catch {
+                // Ignore JSON parse errors on partial chunks
+              }
+            }
+          }
+        }
+      }
+    }
+  }
 
   async function handleStartResearch(e?: React.FormEvent) {
     if (e) e.preventDefault();
@@ -36,6 +97,7 @@ export function ProvenanceApp() {
     if (!query || isSubmitting) return;
 
     setIsSubmitting(true);
+    setIsReplaying(false);
     setTopic(query);
     reset();
 
@@ -51,45 +113,14 @@ export function ProvenanceApp() {
       });
 
       if (!res.ok) {
-        throw new Error(`Research request failed: HTTP ${res.status}`);
+        const errBody = await res.json().catch(() => ({}));
+        throw new Error(
+          (errBody as { error?: string }).error ??
+          `Research request failed: HTTP ${res.status}`
+        );
       }
 
-      if (!res.body) throw new Error("No response body received from stream");
-
-      const reader = res.body.getReader();
-      const decoder = new TextDecoder();
-      let buffer = "";
-
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-
-        buffer += decoder.decode(value, { stream: true });
-        const lines = buffer.split("\n\n");
-        buffer = lines.pop() ?? "";
-
-        for (const block of lines) {
-          for (const line of block.split("\n")) {
-            if (line.startsWith("data: ")) {
-              const raw = line.slice(6).trim();
-              if (raw === "[DONE]") {
-                // Stream finished
-              } else {
-                try {
-                  const parsed = JSON.parse(raw);
-                  if (parsed.type === "run_complete") {
-                    setResult(parsed.payload);
-                  } else {
-                    processEvent(parsed);
-                  }
-                } catch {
-                  // Ignore JSON parse errors on partial chunks
-                }
-              }
-            }
-          }
-        }
-      }
+      await consumeStream(res, false);
     } catch (err: unknown) {
       if (err instanceof Error && err.name !== "AbortError") {
         setError(String(err.message));
@@ -99,10 +130,53 @@ export function ProvenanceApp() {
     }
   }
 
+  async function handleReplay(runId: string, replayTopic: string) {
+    if (isSubmitting) return;
+    setShowReplayPicker(false);
+    setIsSubmitting(true);
+    setIsReplaying(true);
+    setTopic(replayTopic);
+    reset();
+
+    const controller = new AbortController();
+    abortRef.current = controller;
+
+    try {
+      const res = await fetch(`/api/replay?runId=${encodeURIComponent(runId)}`, {
+        signal: controller.signal,
+      });
+
+      if (!res.ok) {
+        const errBody = await res.json().catch(() => ({}));
+        throw new Error(
+          (errBody as { error?: string }).error ??
+          `Replay failed: HTTP ${res.status}`
+        );
+      }
+
+      await consumeStream(res, true);
+    } catch (err: unknown) {
+      if (err instanceof Error && err.name !== "AbortError") {
+        setError(String(err.message));
+      }
+    } finally {
+      setIsSubmitting(false);
+      setIsReplaying(false);
+    }
+  }
+
   return (
     <main className={`provenance-viewport stage-${stage}`}>
       {/* 3D Evidence Graph Canvas */}
       <EvidenceGraphCanvas />
+
+      {/* REPLAY BANNER — shown during replay to clearly distinguish from live */}
+      {isReplaying && (
+        <div className="replay-banner" role="status" aria-live="polite">
+          <span className="replay-icon" aria-hidden="true">&#x25B6;</span>
+          REPLAY OF A REAL RUN — not live research
+        </div>
+      )}
 
       {/* Minimal Top Nav */}
       <nav className="minimal-nav" aria-label="Primary Navigation">
@@ -112,6 +186,17 @@ export function ProvenanceApp() {
         </div>
 
         <div className="nav-controls">
+          {runs.length > 0 && stage === "idle" && (
+            <button
+              type="button"
+              className="control-pill pill-replay"
+              onClick={() => setShowReplayPicker((v) => !v)}
+              title="Replay a previous run"
+              aria-expanded={showReplayPicker}
+            >
+              REPLAY LAST RUN
+            </button>
+          )}
           <button
             type="button"
             className={`control-pill ${lowComplexity ? "pill-active" : ""}`}
@@ -123,6 +208,43 @@ export function ProvenanceApp() {
           </button>
         </div>
       </nav>
+
+      {/* Replay Picker Dropdown */}
+      {showReplayPicker && runs.length > 0 && (
+        <div className="replay-picker" role="dialog" aria-label="Replay a previous run">
+          <div className="replay-picker-header">
+            <span>SELECT A RUN TO REPLAY</span>
+            <button
+              type="button"
+              className="replay-close"
+              onClick={() => setShowReplayPicker(false)}
+              aria-label="Close replay picker"
+            >
+              ✕
+            </button>
+          </div>
+          <div className="replay-picker-note">
+            Replays stream real recorded events — not live AI inference
+          </div>
+          <ul className="replay-run-list">
+            {runs.map((run) => (
+              <li key={run.runId}>
+                <button
+                  type="button"
+                  className="replay-run-item"
+                  onClick={() => handleReplay(run.runId, run.topic)}
+                >
+                  <span className="replay-run-topic">{run.topic}</span>
+                  <span className="replay-run-meta">
+                    {new Date(run.timestamp).toLocaleDateString()} ·{" "}
+                    {run.verificationSummary?.supported ?? 0} verified
+                  </span>
+                </button>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
 
       {/* Agent HUD (running & done states) */}
       <AgentHud />

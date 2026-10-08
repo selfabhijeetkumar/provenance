@@ -1,6 +1,7 @@
 /**
  * Publisher Agent
  * - Always exports Markdown to /runs/{runId}/paper.md
+ * - Persists SSE event stream to /runs/{runId}/replay.jsonl for REPLAY MODE
  * - PDF: print stylesheet only (no new lib added)
  * - Optional webhook: PUBLISH_WEBHOOK_URL env var (n8n-compatible POST)
  * - Fails gracefully if webhook unset or unreachable
@@ -95,7 +96,9 @@ export async function runPublisher(
   draft: Draft,
   table: EvidenceTable,
   verificationResults: VerificationResult[],
-  emit: Emitter
+  emit: Emitter,
+  /** Raw event JSON strings collected during the run — saved for REPLAY MODE */
+  collectedEvents: string[] = []
 ): Promise<PublishResult> {
   emit({
     agent: "publisher",
@@ -134,6 +137,12 @@ export async function runPublisher(
     ),
     "utf-8"
   );
+
+  // REPLAY MODE: persist one event JSON per line with original timestamp
+  if (collectedEvents.length > 0) {
+    const replayPath = join(runDir, "replay.jsonl");
+    writeFileSync(replayPath, collectedEvents.join("\n") + "\n", "utf-8");
+  }
 
   emit({
     agent: "publisher",

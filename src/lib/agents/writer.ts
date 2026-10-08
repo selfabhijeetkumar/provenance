@@ -1,8 +1,11 @@
 /**
  * Writer Agent
  * Drafts 4 sections: Abstract, Findings, Limitations, References.
- * Every factual claim must carry [sourceId] from the evidence table.
+ * Every factual claim must carry [claimId] from the evidence table.
  * Writer cannot cite anything outside the evidence table.
+ *
+ * CITATION DENSITY REQUIREMENT: must cite at least 8 distinct claims,
+ * spread across as many papers as possible.
  */
 
 import { chatWithRetry, parseLlmJson } from "../gemini";
@@ -11,15 +14,15 @@ import { DraftSchema, type Draft, type EvidenceTable } from "../schemas";
 import type { Emitter } from "../sse";
 
 function buildEvidenceSummary(table: EvidenceTable): string {
+  // Include ALL claims (not just 30) for maximum citation density
   return table.claims
-    .slice(0, 30) // cap to keep prompt size reasonable
-    .map((c) => `[${c.claimId}] (source: ${c.sourceId}): ${c.claim}`)
+    .map((c) => `[${c.claimId}] (paper: ${c.paperId}): ${c.claim}`)
     .join("\n");
 }
 
 function buildReferenceList(table: EvidenceTable): string {
   return table.papers
-    .slice(0, 20)
+    .slice(0, 40)
     .map((p) => {
       const authors = p.authors.slice(0, 3).join(", ");
       const more = p.authors.length > 3 ? " et al." : "";
@@ -45,43 +48,46 @@ export async function runWriter(
 
   const evidenceSummary = buildEvidenceSummary(table);
   const referenceList = buildReferenceList(table);
+  const claimCount = table.claims.length;
 
   const feedbackSection = feedbackFromVerifier
-    ? `\n\nVERIFIER FEEDBACK (fix these issues in this revision):\n${feedbackFromVerifier}`
+    ? `\n\nVERIFIER FEEDBACK (you MUST fix these issues in this revision):\n${feedbackFromVerifier}`
     : "";
 
   const prompt = `You are a research writer. Write a structured research paper on the given topic using ONLY the evidence provided.
 
 RULES:
-1. Every factual claim MUST end with [claimId] citing a claim from the evidence list.
+1. Every factual claim MUST end with [claimId] citing a claim from the evidence list below.
 2. You MUST NOT cite any source not in the evidence list.
-3. Write in formal academic English.
-4. Keep Findings section focused and specific.
-5. Limitations section must acknowledge gaps in the evidence.
-6. References section must list only papers actually cited.
+3. You MUST cite at least ${Math.min(claimCount, 8)} distinct claims spread across as many papers as possible.
+4. Write in formal academic English.
+5. Findings section: 3-5 paragraphs, each paragraph making at least 2 cited claims.
+6. Limitations section must acknowledge gaps in the evidence.
+7. References section must list ONLY papers actually cited in the text.
+8. Do not pad with uncited sentences — if you cannot support a sentence with a citation from the list, omit it.
+${feedbackSection}
 
 TOPIC: ${topic}
 
-AVAILABLE EVIDENCE (claim -> source):
+AVAILABLE EVIDENCE (${claimCount} claims — cite as many as relevant):
 ${evidenceSummary}
 
 AVAILABLE REFERENCES:
 ${referenceList}
-${feedbackSection}
 
 Return ONLY valid JSON:
 {
-  "abstract": "One paragraph summary of the paper...",
-  "findings": "2-4 paragraphs of main findings, each claim followed by [claimId]...",
-  "limitations": "1-2 paragraphs on limitations of evidence...",
-  "references": "Formatted reference list of cited sources..."
+  "abstract": "One paragraph summary citing 2-3 key claims [claimId]...",
+  "findings": "3-5 paragraphs of main findings, EVERY factual sentence followed by [claimId]...",
+  "limitations": "1-2 paragraphs on limitations of the evidence base...",
+  "references": "Formatted reference list of ONLY cited sources..."
 }`;
 
   emit?.({
     agent: "writer",
     status: "tool_call",
     tool_call: "llm_draft",
-    input_summary: `Iteration ${iteration}`,
+    input_summary: `Iteration ${iteration} with ${claimCount} claims available`,
     iteration,
   });
 
@@ -91,7 +97,7 @@ Return ONLY valid JSON:
       const raw = await geminiSemaphore.run(() =>
         chatWithRetry(
           [{ role: "user", content: prompt }],
-          { jsonMode: true, temperature: 0.4, maxTokens: 6000 }
+          { jsonMode: true, temperature: 0.3, maxTokens: 8000 }
         )
       );
 

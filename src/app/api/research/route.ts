@@ -6,7 +6,7 @@
  * as a special "run_complete" event.
  *
  * Pipeline:
- *  Orchestrator → Explorer×3 (parallel) → Gatherer → Writer → Verifier
+ *  Orchestrator → Explorer×3 (parallel) → Gatherer (ranked) → Writer → Verifier
  *  → Writer (if needed, max 2 rounds) → Publisher
  */
 
@@ -34,11 +34,26 @@ export async function POST(req: NextRequest) {
     });
   }
 
+  // Fail fast if gateway is not configured
+  if (!process.env.GEMINI_BASE_URL) {
+    return new Response(
+      JSON.stringify({ error: "GEMINI_BASE_URL is not configured. Set it in .env.local" }),
+      { status: 503, headers: { "Content-Type": "application/json" } }
+    );
+  }
+
   const runId = randomUUID();
 
   const stream = new ReadableStream({
     async start(controller) {
-      const emit = makeEmitter(controller);
+      const collectedEvents: string[] = []; // for replay persistence
+
+      const rawEmit = makeEmitter(controller);
+      // Wrap emitter to also collect events for replay
+      const emit: typeof rawEmit = (event) => {
+        rawEmit(event);
+        collectedEvents.push(JSON.stringify(event));
+      };
 
       try {
         // ── Step 1: Orchestrator ─────────────────────────────────────────────
@@ -53,8 +68,8 @@ export async function POST(req: NextRequest) {
         ]);
         const allPapers = [...papers1, ...papers2, ...papers3];
 
-        // ── Step 3: Gatherer ──────────────────────────────────────────────────
-        const evidenceTable = await runGatherer(allPapers, emit);
+        // ── Step 3: Gatherer (topic-aware relevance ranking) ──────────────────
+        const evidenceTable = await runGatherer(allPapers, emit, topic);
 
         if (evidenceTable.claims.length === 0) {
           emitEvent(controller, {
@@ -85,14 +100,15 @@ export async function POST(req: NextRequest) {
 
         const finalDraft = verifierOutput.draftWithFlags;
 
-        // ── Step 6: Publisher ─────────────────────────────────────────────────
+        // ── Step 6: Publisher (receives collected events for replay) ──────────
         const publishResult = await runPublisher(
           runId,
           topic,
           finalDraft,
           evidenceTable,
           verifierOutput.results,
-          emit
+          emit,
+          collectedEvents
         );
 
         // Emit the full run result so the client can render the paper
